@@ -8,7 +8,6 @@ export default defineConfig({
         laravel({
             input: ['resources/css/app.css', 'resources/js/app.jsx'],
             refresh: true,
-            // Add this to handle HMR properly
             hmr: {
                 host: 'localhost'
             }
@@ -30,22 +29,24 @@ export default defineConfig({
             usePolling: true
         }
     },
-    optimizeDeps: {
-        exclude: ['lucide-react'],
-    },
+    base: '/build/',
     build: {
-        chunkSizeWarningLimit: 1000,
-        sourcemap: true,
+        manifest: "manifest.json",
+        outDir: 'public/build',
         rollupOptions: {
+            input: ['resources/css/app.css', 'resources/js/app.jsx'],
             output: {
                 manualChunks: {
                     vendor: ['react', 'react-dom'],
-                    ui: ['@mui/material', '@mui/icons-material'],
-                },
-            },
-        },
-        typescript: {
-            ignoreBuildErrors: true,
-        },
+                    ui: ['@inertiajs/react', '@mui/material']
+                }
+            }
+        }
     },
+    optimizeDeps: {
+        exclude: ['lucide-react']
+    },
+    typescript: {
+        ignoreBuildErrors: true
+    }
 });

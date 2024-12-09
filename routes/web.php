@@ -58,3 +58,8 @@ Route::prefix('admin')->group(function () {
         return Inertia::render('admin/StoreConfigPage');
     })->name('admin.store-config');
 });
+
+
+Route::get('/test', function () {
+    return response()->json(['message' => 'API is working']);
+});

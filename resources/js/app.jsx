@@ -58,10 +58,14 @@ createInertiaApp({
                     setIsAdminRoute(window.location.pathname.includes('/admin'));
                 };
 
-                router.on('navigate', handleRouteChange);
-                return () => {
-                    router.off('navigate', handleRouteChange);
-                };
+                if (router && typeof router.on === 'function') {
+                    router.on('navigate', handleRouteChange);
+                    return () => {
+                        if (router && typeof router.off === 'function') {
+                            router.off('navigate', handleRouteChange);
+                        }
+                    };
+                }
             }, []);
 
             return (
