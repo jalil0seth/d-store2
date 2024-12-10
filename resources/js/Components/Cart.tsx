@@ -2,7 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { X, Minus, Plus, ArrowRight, ArrowLeft } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useCartStore } from '../store/cartStore';
+import { useOrderStore } from '../store/orderStore';
 import { router } from '@inertiajs/react';
+import axios from 'axios'; // Import axios
+import { Fancybox } from "@fancyapps/ui";
+import "@fancyapps/ui/dist/fancybox/fancybox.css";
 
 const CHECKOUT_STEPS = [
   { id: 0, name: 'Cart' },
@@ -26,14 +30,25 @@ export default function Cart() {
     setIsOpen,
   } = useCartStore();
 
+  const { createOrder } = useOrderStore();
+
   const [currentStep, setCurrentStep] = useState(0);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [customerInfo, setCustomerInfo] = useState({
     email: localStorage.getItem('customer_email') || '',
     name: '',
     whatsapp: '',
-    discountCode: ''
+    discountCode: '',
+    notes: ''
   });
-  
+  const [error, setError] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState<number>(8);
+  const [paymentWindow, setPaymentWindow] = useState<Window | null>(null);
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [invoiceId, setInvoiceId] = useState<string | null>(null);
+
   const parseImages = (imagesStr: string | string[]): string[] => {
     if (Array.isArray(imagesStr)) return imagesStr;
     try {
@@ -59,22 +74,131 @@ export default function Cart() {
 
   const cartTotal = calculateTotal();
 
+  const validateInformation = () => {
+    const newErrors: Record<string, string> = {};
+
+    if (!customerInfo.email) {
+      newErrors.email = 'Email is required';
+    } else if (!/\S+@\S+\.\S+/.test(customerInfo.email)) {
+      newErrors.email = 'Please enter a valid email';
+    }
+
+    if (!customerInfo.name) {
+      newErrors.name = 'Full name is required';
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
   const handleBack = () => {
     if (currentStep > 0) {
       setCurrentStep(currentStep - 1);
     }
   };
 
-  const handleCheckout = () => {
+  const handleCheckout = async () => {
+    if (currentStep === 1 && !validateInformation()) {
+      return;
+    }
+
     if (currentStep === CHECKOUT_STEPS.length - 1) {
-      // Process payment and navigate to success page
-      clearCart();
-      setIsOpen(false);
-      router.visit('/checkout/success');
+      setError(null);
+      setIsProcessing(true);
+      try {
+        // First create the order
+        const order = await createOrder(
+          items,
+          cartTotal,
+          customerInfo.email,
+          {
+            name: customerInfo.name,
+            whatsapp: customerInfo.whatsapp || undefined
+          },
+          0,
+          customerInfo.notes
+        );
+
+        setOrderId(order.id);
+
+        // Format the amount with 2 decimal places
+        const formattedAmount = cartTotal.toFixed(2);
+
+        // Then create the invoice/payment URL
+        const paymentResponse = await axios.post(`/api/orders/${order.id}/pay`, {
+          amount: formattedAmount,
+          orderRef: order.order_number,
+          email: customerInfo.email
+        });
+        
+        localStorage.setItem('customer_email', customerInfo.email);
+        
+        if (paymentResponse.data?.url) {
+          setPaymentUrl(paymentResponse.data.url);
+          setInvoiceId(paymentResponse.data.id);
+        } else {
+          setError('Payment URL not found. Please try again.');
+          setIsProcessing(false);
+        }
+      } catch (error: any) {
+        const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
+        console.error('Payment error:', error.response?.data);
+        setError(Array.isArray(errorMessage) ? errorMessage.join('. ') : errorMessage || 'Failed to create order. Please try again.');
+        setIsProcessing(false);
+      }
     } else {
       setCurrentStep(prev => prev + 1);
     }
   };
+
+  // Payment status check
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout;
+    
+    if (orderId && invoiceId) {
+      intervalId = setInterval(async () => {
+        try {
+          const response = await axios.get(`/api/orders/${orderId}/payment-status?invoice_id=${invoiceId}`);
+          if (response.data.status === 'PAID') {
+            clearCart();
+            if (paymentWindow) {
+              paymentWindow.close();
+            }
+            router.visit('/thank-you');
+          }
+        } catch (error) {
+          console.error('Error checking payment status:', error);
+        }
+      }, 3000);
+    }
+
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [orderId, invoiceId]);
+
+  // Countdown effect
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (isProcessing && countdown > 0) {
+      timer = setInterval(() => {
+        setCountdown(prev => prev - 1);
+      }, 1000);
+    } else if (countdown === 0 && paymentUrl) {
+      const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
+      setPaymentWindow(newWindow);
+      setIsProcessing(false);
+      setCountdown(8); // Reset countdown for next time
+    }
+
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [isProcessing, countdown, paymentUrl]);
 
   const renderCartStep = () => {
     const originalTotal = items.reduce((sum, item) => sum + ((item.originalPrice || item.price) * item.quantity), 0);
@@ -195,10 +319,16 @@ export default function Cart() {
             value={customerInfo.email}
             onChange={(e) => {
               setCustomerInfo(prev => ({ ...prev, email: e.target.value }));
+              if (errors.email) setErrors(prev => ({ ...prev, email: '' }));
             }}
-            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 border-gray-300"
+            className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 ${
+              errors.email ? 'border-red-500' : 'border-gray-300'
+            }`}
             placeholder="your@email.com"
           />
+          {errors.email && (
+            <p className="mt-1 text-sm text-red-500">{errors.email}</p>
+          )}
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -209,10 +339,16 @@ export default function Cart() {
             value={customerInfo.name}
             onChange={(e) => {
               setCustomerInfo(prev => ({ ...prev, name: e.target.value }));
+              if (errors.name) setErrors(prev => ({ ...prev, name: '' }));
             }}
-            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 border-gray-300"
+            className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 ${
+              errors.name ? 'border-red-500' : 'border-gray-300'
+            }`}
             placeholder="John Doe"
           />
+          {errors.name && (
+            <p className="mt-1 text-sm text-red-500">{errors.name}</p>
+          )}
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -240,6 +376,18 @@ export default function Cart() {
             placeholder="Enter code"
           />
         </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Order Notes (Optional)
+          </label>
+          <textarea
+            value={customerInfo.notes}
+            onChange={(e) => setCustomerInfo(prev => ({ ...prev, notes: e.target.value }))}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500"
+            placeholder="Any special instructions for your order"
+            rows={3}
+          />
+        </div>
       </div>
     );
   };
@@ -250,20 +398,93 @@ export default function Cart() {
         <div className="flex flex-col items-center justify-center py-8 px-4">
           <div className="w-full max-w-md space-y-6">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <div className="flex justify-center mb-3">
-                <img src="/payment-logos/paypal.svg" alt="PayPal" className="h-5 sm:h-6" />
+              <div className="space-y-4">
+                {error && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
+                    <p className="text-sm font-medium">{error}</p>
+                  </div>
+                )}
+                
+                <div className="border-b pb-4">
+                  <h3 className="text-lg font-medium">Order Summary</h3>
+                  <p className="text-sm text-gray-600 mt-1">Please review your order details</p>
+                </div>
+                
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Email:</span>
+                    <span className="font-medium">{customerInfo.email}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Name:</span>
+                    <span className="font-medium">{customerInfo.name}</span>
+                  </div>
+                  {customerInfo.whatsapp && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">WhatsApp:</span>
+                      <span className="font-medium">{customerInfo.whatsapp}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Total Amount:</span>
+                    <span className="font-medium">${cartTotal.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                {customerInfo.notes && (
+                  <div className="border-t pt-4 mt-4">
+                    <h4 className="text-sm font-medium text-gray-600">Order Notes:</h4>
+                    <p className="text-sm mt-1">{customerInfo.notes}</p>
+                  </div>
+                )}
+                <div className="pt-6 border-t">
+                  <div className="flex justify-center mb-3">
+                    <img src="/payment-logos/paypal.svg" alt="PayPal" className="h-5 sm:h-6" />
+                  </div>
+
+                  {paymentUrl ? (
+                    <button
+                      onClick={() => {
+                        if (paymentWindow?.closed) {
+                          const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
+                          setPaymentWindow(newWindow);
+                        } else {
+                          paymentWindow?.focus();
+                        }
+                      }}
+                      className="w-full bg-[#0070ba] text-white py-3 px-4 rounded-lg hover:bg-[#003087] transition-colors flex items-center justify-center gap-2 text-sm sm:text-base font-medium"
+                    >
+                      <img src="/payment-logos/paypal.svg" alt="" className="h-4 brightness-0 invert" />
+                      Return to PayPal
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleCheckout}
+                      disabled={isProcessing}
+                      className="w-full bg-[#0070ba] text-white py-3 px-4 rounded-lg hover:bg-[#003087] transition-colors flex items-center justify-center gap-2 text-sm sm:text-base font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isProcessing ? (
+                        <div className="flex items-center gap-2">
+                          <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Processing...
+                        </div>
+                      ) : (
+                        <>
+                          <img src="/payment-logos/paypal.svg" alt="" className="h-4 brightness-0 invert" />
+                          Complete Order Now
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  <p className="text-center text-xs text-gray-500 mt-3">
+                    Secure checkout powered by PayPal
+                  </p>
+                </div>
               </div>
-
-              <button
-                className="w-full bg-[#0070ba] text-white py-3 px-4 rounded-lg hover:bg-[#003087] transition-colors flex items-center justify-center gap-2 text-sm sm:text-base font-medium"
-              >
-                <img src="/payment-logos/paypal.svg" alt="" className="h-4 sm:h-5 brightness-0 invert" />
-                Complete Order Now
-              </button>
-
-              <p className="text-center text-xs text-gray-500 mt-3">
-                Secure checkout powered by PayPal
-              </p>
             </div>
           </div>
         </div>
@@ -297,9 +518,9 @@ export default function Cart() {
   }, []);
 
   return (
-    <AnimatePresence>
+    <AnimatePresence mode="wait">
       {isOpen && (
-        <>
+        <div key="cart">
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -407,7 +628,55 @@ export default function Cart() {
               </div>
             </div>
           </motion.div>
-        </>
+        </div>
+      )}
+
+      {/* Processing Modal */}
+      {isProcessing && (
+        <div className="fixed inset-0 flex items-center justify-center z-[100]">
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" />
+          <div className="relative bg-white rounded-lg shadow-xl w-full max-w-md p-6 z-[110]">
+            <div className="text-center">
+              <div className="w-16 h-16 mx-auto mb-4">
+                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-600"></div>
+              </div>
+              <h2 className="text-lg font-medium text-gray-900 mb-2">Processing Order</h2>
+              <p className="text-sm text-gray-500">
+                Opening PayPal in {countdown} seconds...
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Status Modal */}
+      {paymentUrl && !isProcessing && (
+        <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-xl p-4 z-[9999] max-w-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10">
+              <img src="/payment-logos/paypal.svg" alt="PayPal" className="w-full h-full" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-medium text-gray-900">Complete Your Payment</h3>
+              <p className="text-xs text-gray-500">Checking payment status...</p>
+            </div>
+          </div>
+          <div className="mt-3">
+            <button
+              onClick={() => {
+                if (paymentWindow?.closed) {
+                  const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
+                  setPaymentWindow(newWindow);
+                } else {
+                  paymentWindow?.focus();
+                }
+              }}
+              className="w-full px-3 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700"
+            >
+              Return to PayPal
+            </button>
+          </div>
+        </div>
       )}
     </AnimatePresence>
   );

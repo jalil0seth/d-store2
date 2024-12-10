@@ -35,4 +35,14 @@ return [
         ],
     ],
 
+    'paypal' => [
+        'mode' => env('PAYPAL_MODE', 'sandbox'),
+        'client_id' => env('PAYPAL_MODE') === 'sandbox' 
+            ? env('PAYPAL_SANDBOX_CLIENT_ID') 
+            : env('PAYPAL_CLIENT_ID'),
+        'secret' => env('PAYPAL_MODE') === 'sandbox' 
+            ? env('PAYPAL_SANDBOX_SECRET') 
+            : env('PAYPAL_SECRET'),
+    ],
+
 ];

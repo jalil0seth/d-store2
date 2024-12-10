@@ -20,12 +20,17 @@ Route::get('/products', function () {
     return Inertia::render('ProductsPage');
 })->name('products');
 
-Route::get('/product/{slug}-{id}', function ($slug, $id) {
+Route::get('/product/{id}', function ($id) {
     return Inertia::render('product/index', [
-        'productId' => $id,
-        'productSlug' => $slug
+        'productId' => $id
     ]);
 })->name('product.show');
+
+Route::get('/product/{id}/{slug}', function ($id, $slug) {
+    return Inertia::render('product/index', [
+        'productId' => $id
+    ]);
+})->name('product.show.with.slug');
 
 Route::get('/signin', function () {
     return Inertia::render('SignInPage');

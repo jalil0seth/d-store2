@@ -79,10 +79,14 @@ class ProductController extends Controller
         return response()->json($product, 201);
     }
 
-    public function show($slug, $id)
+    public function show($id, $slug = null)
     {
-        $product = Product::where('id', $id)
-            ->firstOrFail();
+        $product = Product::findOrFail($id);
+        
+        // If a slug is provided, verify it matches
+        if ($slug !== null && $slug !== $product->slug) {
+            return response()->json(['message' => 'Product not found'], 404);
+        }
 
         return response()->json([
             'id' => (string) $product->id,
