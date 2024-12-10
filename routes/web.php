@@ -20,9 +20,10 @@ Route::get('/products', function () {
     return Inertia::render('ProductsPage');
 })->name('products');
 
-Route::get('/product/{id}', function ($id) {
+Route::get('/product/{slug}-{id}', function ($slug, $id) {
     return Inertia::render('product/index', [
-        'productId' => $id
+        'productId' => $id,
+        'productSlug' => $slug
     ]);
 })->name('product.show');
 

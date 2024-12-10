@@ -26,12 +26,34 @@ class ProductController extends Controller
             $query->where('featured', (bool)$request->featured);
         }
         
-        $products = $query->paginate(10);
+        $products = $query->paginate(50);
         
-        
+        $items = collect($products->items())->map(function($product) {
+            return [
+                'id' => (string) $product->id,  // Convert to string to match npoint format
+                'name' => $product->name,
+                'slug' => $product->slug,
+                'description' => $product->description,
+                'type' => $product->type,
+                'brand' => $product->brand,
+                'image' => $product->image ?: '',
+                'images' => $product->images ?: '[]',
+                'category' => $product->category,
+                'featured' => (int) $product->featured,  // Convert to int to match npoint format
+                'metadata' => $product->metadata,
+                'variants' => $product->variants,
+                'isAvailable' => (int) $product->isAvailable,  // Convert to int to match npoint format
+                'collectionId' => $product->collectionId,
+                'collectionName' => $product->collectionName
+            ];
+        });
+
         return response()->json([
             'page' => $products->currentPage(),
-            'items' => $products->items(),
+            'perPage' => $products->perPage(),
+            'totalItems' => $products->total(),
+            'totalPages' => $products->lastPage(),
+            'items' => $items
         ]);
     }
 
@@ -57,10 +79,28 @@ class ProductController extends Controller
         return response()->json($product, 201);
     }
 
-    public function show($slug)
+    public function show($slug, $id)
     {
-        $product = Product::where('slug', $slug)->firstOrFail();
-        return response()->json($product);
+        $product = Product::where('id', $id)
+            ->firstOrFail();
+
+        return response()->json([
+            'id' => (string) $product->id,
+            'name' => $product->name,
+            'slug' => $product->slug,
+            'description' => $product->description,
+            'type' => $product->type,
+            'brand' => $product->brand,
+            'image' => $product->image ?: '',
+            'images' => $product->images ?: '[]',
+            'category' => $product->category,
+            'featured' => (int) $product->featured,
+            'metadata' => $product->metadata,
+            'variants' => $product->variants,
+            'isAvailable' => (int) $product->isAvailable,
+            'collectionId' => $product->collectionId,
+            'collectionName' => $product->collectionName
+        ]);
     }
 
     public function update(Request $request, Product $product)

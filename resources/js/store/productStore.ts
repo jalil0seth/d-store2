@@ -1,6 +1,9 @@
 import { create } from 'zustand';
+import axios from 'axios';
 
-const API_URL = 'https://api.npoint.io/a4dfc1a429f00362bafd';
+// Configure axios defaults
+axios.defaults.withCredentials = true;
+axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
 
 interface Product {
     id: string;
@@ -16,8 +19,6 @@ interface Product {
     metadata?: string;
     variants: string;
     isAvailable: number;
-    created?: string;
-    updated?: string;
     collectionId?: string;
     collectionName?: string;
 }
@@ -27,6 +28,10 @@ interface ProductState {
     loading: boolean;
     error: string | null;
     selectedProduct: Product | null;
+    currentPage: number;
+    totalPages: number;
+    perPage: number;
+    totalItems: number;
 }
 
 interface ProductActions {
@@ -34,7 +39,7 @@ interface ProductActions {
     createProduct: (product: Partial<Product>) => Promise<void>;
     deleteProduct: (id: string) => Promise<void>;
     updateProduct: (id: string, data: Partial<Product>) => Promise<void>;
-    getProduct: (id: string) => Promise<Product | null>;
+    getProduct: (id: string) => Promise<void>;
     setSelectedProduct: (product: Product | null) => void;
     clearError: () => void;
 }
@@ -46,21 +51,35 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     loading: false,
     error: null,
     selectedProduct: null,
+    currentPage: 1,
+    totalPages: 1,
+    perPage: 50,
+    totalItems: 0,
 
-    fetchProducts: async () => {
+    fetchProducts: async (filter?: string) => {
         try {
-          set({ loading: true, error: null });
-          const response = await fetch(API_URL);
-          const data = await response.json();
-          
-          if (data.items) {
-            set({ products: data.items, loading: false });
-          } else {
-            throw new Error('Invalid data format');
-          }
+            set({ loading: true, error: null });
+            const url = filter ? `/api/products?${filter}` : '/api/products';
+            const response = await axios.get(url);
+            
+            if (response.data.items) {
+                set({ 
+                    products: response.data.items,
+                    currentPage: response.data.page,
+                    totalPages: response.data.totalPages,
+                    perPage: response.data.perPage,
+                    totalItems: response.data.totalItems,
+                    loading: false 
+                });
+            } else {
+                throw new Error('Invalid data format');
+            }
         } catch (error) {
-          set({ error: error instanceof Error ? error.message : 'Failed to fetch products', loading: false });
-          console.error('Error fetching products:', error);
+            set({ 
+                error: error instanceof Error ? error.message : 'Failed to fetch products',
+                loading: false 
+            });
+            console.error('Error fetching products:', error);
         }
     },
 
@@ -73,66 +92,55 @@ export const useProductStore = create<ProductStore>((set, get) => ({
                 id: variant.id || Math.random().toString(36).substr(2, 9)
             }));
 
-            // For new products, always set featured and isAvailable to 0
             const newProduct = {
                 ...product,
-                id: Math.random().toString(36).substr(2, 9),
                 variants: JSON.stringify(validatedVariants),
                 isAvailable: 0,
                 featured: 0
             };
 
+            const response = await axios.post('/api/products', newProduct);
             const products = get().products;
-            set({ products: [...products, newProduct as Product], loading: false });
+            set({ products: [...products, response.data], loading: false });
         } catch (error) {
-            set({ error: (error as Error).message, loading: false });
+            set({ error: error instanceof Error ? error.message : 'Failed to create product', loading: false });
         }
     },
 
     deleteProduct: async (id: string) => {
-        set({ loading: true, error: null });
         try {
-            const products = get().products.filter(product => product.id !== id);
-            set({ products, loading: false });
+            await axios.delete(`/api/products/${id}`);
+            const products = get().products;
+            set({ products: products.filter(p => p.id !== id) });
         } catch (error) {
-            set({ error: (error as Error).message, loading: false });
+            set({ error: error instanceof Error ? error.message : 'Failed to delete product' });
         }
     },
 
     updateProduct: async (id: string, data: Partial<Product>) => {
         set({ loading: true, error: null });
         try {
-            const existingProduct = get().products.find(p => p.id === id);
-            if (!existingProduct) {
-                throw new Error('Product not found');
-            }
-
-            const updatedProduct = {
-                ...existingProduct,
-                ...data,
-                featured: data.featured ?? existingProduct.featured,
-                isAvailable: data.isAvailable ?? existingProduct.isAvailable
-            };
-
+            const response = await axios.put(`/api/products/${id}`, data);
             const products = get().products.map(p => 
-                p.id === id ? updatedProduct : p
+                p.id === id ? { ...p, ...response.data } : p
             );
             set({ products, loading: false });
         } catch (error) {
-            set({ error: (error as Error).message, loading: false });
-            throw error;
+            set({ error: error instanceof Error ? error.message : 'Failed to update product', loading: false });
         }
     },
 
     getProduct: async (id: string) => {
-        set({ loading: true, error: null });
         try {
-            const product = get().products.find(p => p.id === id) || null;
-            set({ selectedProduct: product, loading: false });
-            return product;
+            set({ loading: true, error: null });
+            const response = await axios.get(`/api/products/${id}`);
+            set({ selectedProduct: response.data, loading: false });
         } catch (error) {
-            set({ error: (error as Error).message, loading: false, selectedProduct: null });
-            throw error;
+            set({ 
+                error: error instanceof Error ? error.message : 'Failed to get product',
+                selectedProduct: null,
+                loading: false
+            });
         }
     },
 

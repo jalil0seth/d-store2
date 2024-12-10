@@ -136,7 +136,7 @@ export default function ProductCard({ product, layout = true }: ProductCardProps
       className="group relative bg-white rounded-xl shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden flex flex-col h-full"
     >
       <div className="relative aspect-[4/3] overflow-hidden bg-white">
-        <Link href={`/product/${product.id}`} className="block w-full h-full">
+        <Link href={`/product/${product.slug}-${product.id}`} className="block w-full h-full">
           <img
             src={imageUrl}
             alt={product.name}
@@ -156,7 +156,7 @@ export default function ProductCard({ product, layout = true }: ProductCardProps
 
       <div className="p-4 flex-1 flex flex-col">
         <div className="mb-3">
-          <Link href={`/product/${product.id}`}>
+          <Link href={`/products/${product.slug}-${product.id}`}>
             <h3 className="font-semibold text-lg text-gray-900 group-hover:text-primary-600 transition-colors">
               {product.name}
             </h3>

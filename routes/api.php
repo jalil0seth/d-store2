@@ -19,7 +19,7 @@ Route::get('/test', function () {
 Route::prefix('products')->group(function () {
     Route::get('/', [ProductController::class, 'index']);
     Route::get('/import', [ProductController::class, 'importFromApi']);
-    Route::get('/{slug}', [ProductController::class, 'show']);
+    Route::get('/{slug}-{id}', [ProductController::class, 'show']);
 });
 
 // Protected Routes
