@@ -26,8 +26,8 @@ interface ProductPageProps {
 
 export default function ProductPage({ productId }: ProductPageProps) {
   const { selectedProduct, getProduct, products, fetchProducts } = useProductStore();
+  const { addItem, setIsOpen } = useCartStore();
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
-  const { addItem } = useCartStore();
   const [addedToCart, setAddedToCart] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isVariantSheetOpen, setIsVariantSheetOpen] = useState(false);
@@ -78,27 +78,40 @@ export default function ProductPage({ productId }: ProductPageProps) {
   }
 
   const handleAddToCart = () => {
-    if (selectedVariant) {
-      const itemToAdd = {
+    if (!selectedProduct) return;
+
+    // If no variant is selected but we have variants, select the first one
+    if (!selectedVariant && selectedProduct.variants) {
+      const variants = Array.isArray(selectedProduct.variants)
+        ? selectedProduct.variants
+        : JSON.parse(selectedProduct.variants);
+      if (variants.length > 0) {
+        setSelectedVariant(variants[0]);
+        return;
+      }
+    }
+
+    const variant = selectedVariant || {
+      id: selectedProduct.id,
+      name: 'Default',
+      price: selectedProduct.price,
+      original_price: selectedProduct.price,
+      quantity: 1
+    };
+
+    addItem(
+      {
         id: selectedProduct.id,
         name: selectedProduct.name,
-        price: selectedVariant.price,
-        originalPrice: selectedVariant.original_price || selectedVariant.price,
-        image: selectedProduct.image,
-        description: selectedProduct.description,
-        variant: {
-          name: selectedVariant.name,
-          price: selectedVariant.price,
-          discountPercentage: selectedVariant.discountPercentage,
-          billingCycle: selectedVariant.billingCycle
-        }
-      };
-      
-      addItem(itemToAdd);
-      setAddedToCart(true);
-      setTimeout(() => setAddedToCart(false), 2000);
-      setIsVariantSheetOpen(false);
-    }
+        image: selectedProduct.image || ''
+      },
+      variant
+    );
+    
+    setAddedToCart(true);
+    setIsOpen(true);
+    setTimeout(() => setAddedToCart(false), 2000);
+    setIsVariantSheetOpen(false);
   };
 
   const handleShare = async () => {

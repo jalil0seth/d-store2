@@ -83,36 +83,24 @@ export default function ProductCard({ product, layout = true }: ProductCardProps
       return;
     }
 
-    // Prepare product object according to Product interface
-    const productData = {
+    const variant = selectedVariant || {
       id: product.id,
-      name: product.name,
-      image: product.image || product.images?.[0] || ''
+      name: 'Default',
+      price: product.price,
+      original_price: product.originalPrice || product.price,
+      quantity: 1
     };
 
-    // If we have a selected variant, use it
-    if (selectedVariant) {
-      const variantData = {
-        id: `${product.id}-${selectedVariant.name}`, // Generate a unique variant ID
-        name: selectedVariant.name,
-        price: selectedVariant.price,
-        original_price: selectedVariant.original_price,
-        quantity: 1 // You might want to get this from your backend
-      };
-      addItem(productData, variantData);
-    } else {
-      // If no variants, create a default variant from product data
-      const defaultVariant = {
-        id: `${product.id}-default`,
-        name: 'Default',
-        price: product.price,
-        original_price: product.originalPrice,
-        quantity: 1 // You might want to get this from your backend
-      };
-      addItem(productData, defaultVariant);
-    }
-
-    setIsOpen(true); // Open the cart after adding item
+    addItem(
+      {
+        id: product.id,
+        name: product.name,
+        image: product.image || product.images?.[0] || ''
+      },
+      variant
+    );
+    
+    setIsOpen(true);
   };
 
   const metadata = typeof product.metadata === 'string'

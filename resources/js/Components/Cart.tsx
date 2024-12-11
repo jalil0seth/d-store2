@@ -384,6 +384,20 @@ export default function Cart() {
     }
   }, [timeLeft]);
 
+  useEffect(() => {
+    // Reset to first step when cart is opened
+    if (isOpen) {
+      setCurrentStep(0);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    // Add effect to reset step when items change
+    if (items.length > 0) {
+      setCurrentStep(0);
+    }
+  }, [items]);
+
   const resetPaymentSession = (clearStorage = false) => {
     if (clearStorage) {
       localStorage.removeItem('payment_url');
