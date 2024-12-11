@@ -61,7 +61,7 @@ export const useCartStore = create<CartStore>()(
             item.id === id ? { ...item, quantity } : item
           ),
         })),
-      clearCart: () => set({ items: [] }),
+      clearCart: () => set({ items: [], isOpen: false, highlightedItemId: null }),
       setIsOpen: (isOpen) => set({ isOpen }),
       setHighlightedItemId: (id) => set({ highlightedItemId: id }),
     }),

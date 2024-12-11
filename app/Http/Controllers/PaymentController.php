@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Order;
 use App\Services\PayPalService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -18,67 +19,118 @@ class PaymentController extends Controller
     public function createInvoice(Request $request)
     {
         try {
-            Log::info('Creating invoice with data:', $request->all());
+            $order = Order::findOrFail($request->order_id);
             
-            $validated = $request->validate([
-                'amount' => ['required', 'regex:/^\d+\.\d{2}$/'],
-                'orderRef' => 'required|string',
-                'email' => 'required|email'
+            if ($order->invoice_id) {
+                $status = $this->paypalService->checkStatus($order->invoice_id);
+                if ($status['paid']) {
+                    $order->markAsPaid();
+                    return response()->json([
+                        'status' => 'success',
+                        'message' => 'Order already paid',
+                        'data' => ['paid' => true]
+                    ]);
+                }
+                
+                return response()->json([
+                    'status' => 'success',
+                    'data' => [
+                        'payment_url' => $order->payment_url,
+                        'invoice_id' => $order->invoice_id,
+                        'payment_status' => $order->payment_status
+                    ]
+                ]);
+            }
+
+            $order->markAsProcessing();
+            $result = $this->paypalService->createInvoice($order);
+            
+            $order->update([
+                'payment_method' => 'paypal',
+                'invoice_id' => $result['invoice_id'],
+                'payment_url' => $result['payment_url']
             ]);
 
-            $result = $this->paypalService->createInvoice(
-                $validated['amount'],
-                $validated['orderRef'],
-                $validated['email']
-            );
-
-            return response()->json($result);
+            return response()->json([
+                'status' => 'success',
+                'data' => array_merge($result, [
+                    'payment_status' => $order->payment_status
+                ])
+            ]);
 
         } catch (\Exception $e) {
             Log::error('Payment creation failed:', [
                 'error' => $e->getMessage(),
-                'request_data' => $request->all(),
                 'trace' => $e->getTraceAsString()
             ]);
-            
-            $errorMessage = $e->getMessage();
-            if ($e instanceof \Illuminate\Validation\ValidationException) {
-                $errorMessage = implode('. ', array_map(function($errors) {
-                    return implode('. ', $errors);
-                }, $e->validator->errors()->toArray()));
-            }
-            
+
+            $order?->markAsFailed();
+
             return response()->json([
-                'error' => $errorMessage
-            ], 400);
+                'status' => 'error',
+                'message' => 'Failed to create payment'
+            ], 500);
         }
     }
 
-    public function checkStatus(Request $request, $order)
+    public function checkStatus(Request $request)
     {
         try {
-            // Get the invoice ID from the order or request
-            $invoiceId = $request->query('invoice_id');
-            
-            if (!$invoiceId) {
-                return response()->json([
-                    'error' => 'Invoice ID is required'
-                ], 400);
+            $order = Order::where('invoice_id', $request->invoice_id)->firstOrFail();
+            $status = $this->paypalService->checkStatus($order->invoice_id);
+
+            if ($status['paid']) {
+                $order->markAsPaid();
+            } elseif ($status['status'] === 'CANCELLED') {
+                $order->markAsCancelled();
+            } elseif ($status['status'] === 'PAYMENT_FAILED') {
+                $order->markAsFailed();
             }
 
-            $status = $this->paypalService->checkInvoiceStatus($invoiceId);
-            return response()->json($status);
+            return response()->json([
+                'status' => 'success',
+                'data' => array_merge($status, [
+                    'payment_status' => $order->payment_status
+                ])
+            ]);
 
         } catch (\Exception $e) {
             Log::error('Payment status check failed:', [
                 'error' => $e->getMessage(),
-                'request_data' => $request->all(),
                 'trace' => $e->getTraceAsString()
             ]);
-            
+
             return response()->json([
-                'error' => $e->getMessage()
-            ], 400);
+                'status' => 'error',
+                'message' => 'Failed to check payment status'
+            ], 500);
+        }
+    }
+
+    public function cancel(Request $request)
+    {
+        try {
+            $order = Order::findOrFail($request->order_id);
+            $order->markAsCancelled();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Payment cancelled',
+                'data' => [
+                    'payment_status' => $order->payment_status
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Payment cancellation failed:', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to cancel payment'
+            ], 500);
         }
     }
 }

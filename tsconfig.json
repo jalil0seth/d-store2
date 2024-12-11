@@ -18,8 +18,14 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["resources/js/*"]
-    }
+    },
+    "typeRoots": ["./resources/js/types", "./node_modules/@types"]
   },
-  "include": ["resources/js/**/*.ts", "resources/js/**/*.tsx", "resources/js/**/*.d.ts"],
+  "include": [
+    "resources/js/**/*.ts",
+    "resources/js/**/*.tsx",
+    "resources/js/**/*.d.ts",
+    "resources/js/types/global.d.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -2,9 +2,9 @@
 
 namespace App\Services;
 
+use App\Models\Payment;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Config;
 
 class PayPalService
 {
@@ -20,16 +20,27 @@ class PayPalService
 
     public function __construct()
     {
-        $this->mode = config('services.paypal.mode', 'sandbox');
-        $this->clientId = config('services.paypal.client_id');
-        $this->secret = config('services.paypal.secret');
+        $paypal = Payment::where('active', true)
+            ->where('name', 'paypal')
+            ->first();
+
+        if (!$paypal) {
+            Log::error('No active PayPal configuration found');
+            throw new \Exception('PayPal configuration not found');
+        }
+
+        $config = $paypal->config;
+        
+        $this->mode = $config['mode'] ?? 'sandbox';
+        $this->clientId = $config['client_id'] ?? null;
+        $this->secret = $config['client_secret'] ?? null;
         $this->baseUrl = $this->mode === 'sandbox' 
             ? 'https://api-m.sandbox.paypal.com' 
             : 'https://api-m.paypal.com';
         
         $this->shopName = config('app.name', 'Store Name');
-        $this->shopNotes = config('services.paypal.notes', '');
-        $this->shopTerms = config('services.paypal.terms', '');
+        $this->shopNotes = $config['notes'] ?? '';
+        $this->shopTerms = $config['terms'] ?? '';
 
         if (!$this->clientId || !$this->secret) {
             Log::error('PayPal credentials missing:', [
@@ -100,10 +111,20 @@ class PayPalService
                         'given_name' => $firstName,
                         'surname' => $lastName,
                     ],
+                    'address' => [
+                        'country_code' => 'US'
+                    ]
                 ],
                 'primary_recipients' => [[
                     'billing_info' => [
-                        'email_address' => $email
+                        'name' => [
+                            'given_name' => 'Valued',
+                            'surname' => 'Customer'
+                        ],
+                        'email_address' => $email,
+                        'address' => [
+                            'country_code' => 'US'
+                        ]
                     ]
                 ]],
                 'items' => [[
@@ -112,16 +133,21 @@ class PayPalService
                     'quantity' => '1',
                     'unit_amount' => [
                         'currency_code' => $this->currency,
-                        'value' => $amount
+                        'value' => number_format((float)$amount, 2, '.', '')
                     ]
                 ]],
                 'amount' => [
                     'breakdown' => [
                         'item_total' => [
                             'currency_code' => $this->currency,
-                            'value' => $amount
+                            'value' => number_format((float)$amount, 2, '.', '')
                         ]
                     ]
+                ],
+                'configuration' => [
+                    'tax_calculated_after_discount' => false,
+                    'tax_inclusive' => false,
+                    'allow_tip' => false
                 ]
             ];
 
@@ -147,9 +173,13 @@ class PayPalService
 
             // Send the invoice
             Log::info('Sending PayPal invoice...');
+            $sendData = [
+                'send_to_recipient' => true,
+                'send_to_invoicer' => true
+            ];
+
             $sendResponse = Http::withToken($this->accessToken)
-                ->withHeaders(['Prefer' => 'return=representation'])
-                ->post("{$this->baseUrl}/v2/invoicing/invoices/{$invoiceId}/send", (object)[]);
+                ->post("{$this->baseUrl}/v2/invoicing/invoices/{$invoiceId}/send", $sendData);
 
             if (!$sendResponse->successful()) {
                 Log::error('PayPal send invoice error:', [
@@ -188,6 +218,10 @@ class PayPalService
     public function checkInvoiceStatus($invoiceId)
     {
         try {
+            if (!$invoiceId) {
+                throw new \Exception("Invoice ID is required");
+            }
+
             $response = Http::withToken($this->accessToken)
                 ->get("{$this->baseUrl}/v2/invoicing/invoices/{$invoiceId}");
 
@@ -201,18 +235,35 @@ class PayPalService
             }
 
             $data = $response->json();
-            Log::info('Got invoice status:', $data);
+            Log::info('Got invoice status:', ['data' => $data]);
+
+            // Map PayPal status to our status
+            $status = match($data['status']) {
+                'PAID' => 'paid',
+                'MARKED_AS_PAID' => 'paid',
+                'CANCELLED' => 'cancelled',
+                'REFUNDED' => 'refunded',
+                'PARTIALLY_REFUNDED' => 'partially_refunded',
+                'MARKED_AS_REFUNDED' => 'refunded',
+                'UNPAID' => 'pending',
+                'DRAFT' => 'pending',
+                'SCHEDULED' => 'pending',
+                'SENT' => 'pending',
+                default => 'pending'
+            };
 
             return [
-                'status' => $data['status'],
-                'total' => $data['amount']['breakdown']['item_total']['value'] ?? null,
-                'invoice_id' => $invoiceId
+                'status' => $status,
+                'invoice_id' => $invoiceId,
+                'raw_status' => $data['status'],
+                'payment_info' => $data['payments'] ?? null
             ];
 
         } catch (\Exception $e) {
             Log::error('Error checking invoice status:', [
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'trace' => $e->getTraceAsString(),
+                'invoiceId' => $invoiceId
             ]);
             throw $e;
         }

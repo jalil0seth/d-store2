@@ -1,12 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Minus, Plus, ArrowRight, ArrowLeft } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useCartStore } from '../store/cartStore';
 import { useOrderStore } from '../store/orderStore';
 import { router } from '@inertiajs/react';
-import axios from 'axios'; // Import axios
+import axios from 'axios';
 import { Fancybox } from "@fancyapps/ui";
 import "@fancyapps/ui/dist/fancybox/fancybox.css";
+import PaymentCountdown from './PaymentCountdown';
 
 const CHECKOUT_STEPS = [
   { id: 0, name: 'Cart' },
@@ -36,7 +37,7 @@ export default function Cart() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [customerInfo, setCustomerInfo] = useState({
     email: localStorage.getItem('customer_email') || '',
-    name: '',
+    name: localStorage.getItem('customer_name') || '',
     whatsapp: '',
     discountCode: '',
     notes: ''
@@ -44,10 +45,17 @@ export default function Cart() {
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
-  const [countdown, setCountdown] = useState<number>(8);
-  const [paymentWindow, setPaymentWindow] = useState<Window | null>(null);
-  const [orderId, setOrderId] = useState<string | null>(null);
-  const [invoiceId, setInvoiceId] = useState<string | null>(null);
+  const [lastOrderId, setLastOrderId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('last_order_id');
+    return stored ? parseInt(stored) : null;
+  });
+  const [isCheckingPayment, setIsCheckingPayment] = useState(false);
+  const paymentCheckInterval = useRef<NodeJS.Timeout>();
+  const [currentOrder, setCurrentOrder] = useState<any>(null);
+  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'processing' | 'paid' | null>(null);
+  const [lastOrderItems, setLastOrderItems] = useState<string>('');
+
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
 
   const parseImages = (imagesStr: string | string[]): string[] => {
     if (Array.isArray(imagesStr)) return imagesStr;
@@ -77,13 +85,13 @@ export default function Cart() {
   const validateInformation = () => {
     const newErrors: Record<string, string> = {};
 
-    if (!customerInfo.email) {
+    if (!customerInfo.email.trim()) {
       newErrors.email = 'Email is required';
     } else if (!/\S+@\S+\.\S+/.test(customerInfo.email)) {
       newErrors.email = 'Please enter a valid email';
     }
 
-    if (!customerInfo.name) {
+    if (!customerInfo.name.trim()) {
       newErrors.name = 'Full name is required';
     }
 
@@ -97,108 +105,374 @@ export default function Cart() {
     }
   };
 
-  const handleCheckout = async () => {
-    if (currentStep === 1 && !validateInformation()) {
-      return;
-    }
-
-    if (currentStep === CHECKOUT_STEPS.length - 1) {
-      setError(null);
-      setIsProcessing(true);
-      try {
-        // First create the order
-        const order = await createOrder(
-          items,
-          cartTotal,
-          customerInfo.email,
-          {
-            name: customerInfo.name,
-            whatsapp: customerInfo.whatsapp || undefined
-          },
-          0,
-          customerInfo.notes
-        );
-
-        setOrderId(order.id);
-
-        // Format the amount with 2 decimal places
-        const formattedAmount = cartTotal.toFixed(2);
-
-        // Then create the invoice/payment URL
-        const paymentResponse = await axios.post(`/api/orders/${order.id}/pay`, {
-          amount: formattedAmount,
-          orderRef: order.order_number,
-          email: customerInfo.email
-        });
-        
-        localStorage.setItem('customer_email', customerInfo.email);
-        
-        if (paymentResponse.data?.url) {
-          setPaymentUrl(paymentResponse.data.url);
-          setInvoiceId(paymentResponse.data.id);
-        } else {
-          setError('Payment URL not found. Please try again.');
-          setIsProcessing(false);
-        }
-      } catch (error: any) {
-        const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
-        console.error('Payment error:', error.response?.data);
-        setError(Array.isArray(errorMessage) ? errorMessage.join('. ') : errorMessage || 'Failed to create order. Please try again.');
-        setIsProcessing(false);
+  const checkPaymentStatus = async (orderId: number) => {
+    try {
+      const response = await axios.get(`/api/orders/${orderId}/payment-status`);
+      setPaymentStatus(response.data.status);
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        console.error('Order not found');
+        return null;
       }
-    } else {
-      setCurrentStep(prev => prev + 1);
+      throw error;
     }
   };
 
-  // Payment status check
-  useEffect(() => {
-    let intervalId: NodeJS.Timeout;
+  const updatePaymentUrl = (url: string | null, orderId: number | null) => {
+    setPaymentUrl(url);
+    setLastOrderId(orderId);
     
-    if (orderId && invoiceId) {
-      intervalId = setInterval(async () => {
-        try {
-          const response = await axios.get(`/api/orders/${orderId}/payment-status?invoice_id=${invoiceId}`);
-          if (response.data.status === 'PAID') {
-            clearCart();
-            if (paymentWindow) {
-              paymentWindow.close();
-            }
-            router.visit('/thank-you');
+    if (url && orderId) {
+      localStorage.setItem('payment_url', url);
+      localStorage.setItem('last_order_id', orderId.toString());
+    } else {
+      localStorage.removeItem('payment_url');
+      localStorage.removeItem('last_order_id');
+    }
+  };
+
+  const initiatePayment = async (order: any) => {
+    try {
+      const formattedAmount = Number(order.total).toFixed(2);
+      const paymentResponse = await axios.post(`/api/orders/${order.id}/pay`, {
+        amount: formattedAmount,
+        orderRef: order.id,
+        email: order.customer_email
+      });
+      
+      if (paymentResponse.data?.url) {
+        updatePaymentUrl(paymentResponse.data.url, order.id);
+        window.open(paymentResponse.data.url, '_blank')?.focus();
+        startPaymentCheck(order.id);
+      } else {
+        setError('Payment URL not found. Please try again.');
+      }
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
+      console.error('Payment error:', error.response?.data);
+      setError(Array.isArray(errorMessage) ? errorMessage.join('. ') : errorMessage || 'Failed to initiate payment. Please try again.');
+    }
+  };
+
+  const startPaymentCheck = (orderId: number) => {
+    if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+    }
+
+    const startTime = Date.now();
+    const maxDuration = 30 * 60 * 1000; // 30 minutes
+    
+    const checkInterval = setInterval(async () => {
+      try {
+        if (Date.now() - startTime > maxDuration) {
+          if (paymentCheckInterval.current) {
+            clearInterval(paymentCheckInterval.current);
+            paymentCheckInterval.current = undefined;
           }
-        } catch (error) {
-          console.error('Error checking payment status:', error);
+          return;
         }
-      }, 3000);
+
+        const response = await axios.get(`/api/orders/${orderId}/payment-status`);
+        const { status, redirect } = response.data;
+
+        if (!status) {
+          if (paymentCheckInterval.current) {
+            clearInterval(paymentCheckInterval.current);
+            paymentCheckInterval.current = undefined;
+          }
+          return;
+        }
+
+        if (status === 'paid' && redirect) {
+          if (paymentCheckInterval.current) {
+            clearInterval(paymentCheckInterval.current);
+            paymentCheckInterval.current = undefined;
+          }
+          clearCart();
+          resetPaymentSession(true);
+          window.location.href = redirect;
+        }
+      } catch (error) {
+        console.error('Payment status check failed:', error);
+      }
+    }, 5000);
+
+    paymentCheckInterval.current = checkInterval;
+  };
+
+  const hasCartChanged = () => {
+    if (!currentOrder) return true;
+    
+    const currentItemsString = JSON.stringify(items.map(item => ({
+      id: item.id,
+      quantity: item.quantity
+    })));
+    
+    return currentItemsString !== lastOrderItems;
+  };
+
+  const getButtonText = () => {
+    const storedOrderId = localStorage.getItem('last_order_id');
+    const storedPaymentUrl = localStorage.getItem('payment_url');
+    
+    if (currentStep < CHECKOUT_STEPS.length - 1) {
+      return 'Continue';
+    }
+    
+    if (isProcessing) {
+      return 'Processing...';
     }
 
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
-  }, [orderId, invoiceId]);
+    if (storedOrderId && storedPaymentUrl) {
+      return 'Return to Payment';
+    }
 
-  // Countdown effect
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (isProcessing && countdown > 0) {
-      timer = setInterval(() => {
-        setCountdown(prev => prev - 1);
-      }, 1000);
-    } else if (countdown === 0 && paymentUrl) {
-      const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
-      setPaymentWindow(newWindow);
+    return 'Complete Order Now';
+  };
+
+  const handleButtonClick = async () => {
+    if (currentStep === 1) {
+      if (!validateInformation()) {
+        return;
+      }
+    }
+    
+    if (currentStep < CHECKOUT_STEPS.length - 1) {
+      setCurrentStep(prev => prev + 1);
+      return;
+    }
+
+    const storedUrl = localStorage.getItem('payment_url');
+    const storedOrderId = localStorage.getItem('last_order_id');
+    
+    if (storedUrl && storedOrderId) {
+      window.open(storedUrl, '_blank')?.focus();
+      startPaymentCheck(parseInt(storedOrderId));
+      return;
+    }
+
+    handleCheckout();
+  };
+
+  const handleCheckout = async () => {
+    setError(null);
+    setIsProcessing(true);
+    try {
+      const order = await createOrder(
+        items,
+        Number(cartTotal),
+        customerInfo.email,
+        {
+          name: customerInfo.name,
+          whatsapp: customerInfo.whatsapp || undefined,
+          notes: customerInfo.notes || undefined
+        },
+        0
+      );
+
+      // Store current items state
+      const currentItemsString = JSON.stringify(items.map(item => ({
+        id: item.id,
+        quantity: item.quantity
+      })));
+      setLastOrderItems(currentItemsString);
+
+      setCurrentOrder(order);
+      localStorage.setItem('customer_email', customerInfo.email);
+      await initiatePayment(order);
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
+      console.error('Payment error:', error.response?.data);
+      setError(Array.isArray(errorMessage) ? errorMessage.join('. ') : errorMessage || 'Failed to create order. Please try again.');
+    } finally {
       setIsProcessing(false);
-      setCountdown(8); // Reset countdown for next time
     }
+  };
 
+  const formatTime = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+  };
+
+  const startCountdown = () => {
+    const PAYMENT_TIMEOUT = 8 * 60; // 8 minutes in seconds
+    setTimeLeft(PAYMENT_TIMEOUT);
+  };
+
+  const resetPaymentSession = (clearStorage = false) => {
+    if (clearStorage) {
+      localStorage.removeItem('payment_url');
+      localStorage.removeItem('last_order_id');
+    }
+    setPaymentUrl(null);
+    setTimeLeft(null);
+    setCurrentOrder(null);
+    setPaymentStatus(null);
+    setLastOrderItems('');
+  };
+
+  const handleCountdownExpired = () => {
+    resetPaymentSession(true); // Clear storage when countdown expires
+  };
+
+  const handleClose = () => {
+    setIsOpen(false);
+    if (paymentCheckInterval.current) {
+      clearInterval(paymentCheckInterval.current);
+      paymentCheckInterval.current = undefined;
+    }
+    resetPaymentSession(false); // Don't clear storage when closing cart
+  };
+
+  const handleInputChange = (field: string, value: string) => {
+    setCustomerInfo(prev => ({ ...prev, [field]: value }));
+    
+    // Store in localStorage for email and name
+    if (field === 'email' || field === 'name') {
+      localStorage.setItem(`customer_${field}`, value);
+    }
+    
+    // Clear error for the field being edited
+    if (errors[field]) {
+      setErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors[field];
+        return newErrors;
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (timeLeft === null) return;
+
+    const timer = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev === null || prev <= 0) {
+          clearInterval(timer);
+          handleCountdownExpired();
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [timeLeft]);
+
+  useEffect(() => {
+    if (paymentUrl) {
+      startCountdown();
+    }
+  }, [paymentUrl]);
+
+  useEffect(() => {
     return () => {
-      if (timer) {
-        clearInterval(timer);
+      if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
       }
     };
-  }, [isProcessing, countdown, paymentUrl]);
+  }, []);
+
+  useEffect(() => {
+    if (hasCartChanged()) {
+      resetPaymentSession(true); // Clear storage when cart changes
+    }
+  }, [items]);
+
+  useEffect(() => {
+    if (paymentStatus === 'paid') {
+      resetPaymentSession(true); // Clear storage when payment is completed
+    }
+  }, [paymentStatus]);
+
+  useEffect(() => {
+    const validateStoredPayment = async () => {
+      const storedUrl = localStorage.getItem('payment_url');
+      const storedOrderId = localStorage.getItem('last_order_id');
+      
+      if (!storedUrl || !storedOrderId) {
+        resetPaymentSession(false);
+        return;
+      }
+
+      try {
+        const status = await checkPaymentStatus(parseInt(storedOrderId));
+        
+        if (!status) {
+          resetPaymentSession(true); // Clear storage if payment status check fails
+          return;
+        }
+
+        if (status.isPaid) {
+          handlePaymentCompletion(parseInt(storedOrderId));
+          return;
+        }
+
+        if (currentOrder?.id === parseInt(storedOrderId)) {
+          setPaymentUrl(storedUrl);
+          setLastOrderId(parseInt(storedOrderId));
+          startCountdown();
+          startPaymentCheck(parseInt(storedOrderId));
+        } else {
+          resetPaymentSession(true); // Clear storage if order ID doesn't match
+        }
+      } catch (error) {
+        console.error('Error checking stored payment:', error);
+        resetPaymentSession(true); // Clear storage on error
+      }
+    };
+
+    validateStoredPayment();
+  }, [currentOrder]);
+
+  useEffect(() => {
+    const storedUrl = localStorage.getItem('payment_url');
+    const storedOrderId = localStorage.getItem('last_order_id');
+    
+    if (storedUrl && storedOrderId && currentOrder?.id === parseInt(storedOrderId)) {
+      setPaymentUrl(storedUrl);
+      setLastOrderId(parseInt(storedOrderId));
+    } else {
+      resetPaymentSession(false);
+    }
+  }, [currentOrder]);
+
+  useEffect(() => {
+    const handleUnload = () => {
+      localStorage.removeItem('payment_url');
+      localStorage.removeItem('last_order_id');
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+        paymentCheckInterval.current = undefined;
+      }
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    // Close cart if we're on the thank you page
+    if (window.location.pathname.includes('/thank-you')) {
+      setIsOpen(false);
+    }
+  }, [setIsOpen]);
 
   const renderCartStep = () => {
     const originalTotal = items.reduce((sum, item) => sum + ((item.originalPrice || item.price) * item.quantity), 0);
@@ -307,90 +581,71 @@ export default function Cart() {
     );
   };
 
-  const renderInformationStep = () => {
-    return (
-      <div className="p-4 space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Email <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="email"
-            value={customerInfo.email}
-            onChange={(e) => {
-              setCustomerInfo(prev => ({ ...prev, email: e.target.value }));
-              if (errors.email) setErrors(prev => ({ ...prev, email: '' }));
-            }}
-            className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 ${
-              errors.email ? 'border-red-500' : 'border-gray-300'
-            }`}
-            placeholder="your@email.com"
-          />
-          {errors.email && (
-            <p className="mt-1 text-sm text-red-500">{errors.email}</p>
-          )}
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Full Name <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="text"
-            value={customerInfo.name}
-            onChange={(e) => {
-              setCustomerInfo(prev => ({ ...prev, name: e.target.value }));
-              if (errors.name) setErrors(prev => ({ ...prev, name: '' }));
-            }}
-            className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 ${
-              errors.name ? 'border-red-500' : 'border-gray-300'
-            }`}
-            placeholder="John Doe"
-          />
-          {errors.name && (
-            <p className="mt-1 text-sm text-red-500">{errors.name}</p>
-          )}
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            WhatsApp Number (Optional)
-          </label>
-          <input
-            type="tel"
-            value={customerInfo.whatsapp}
-            onChange={(e) => {
-              setCustomerInfo(prev => ({ ...prev, whatsapp: e.target.value }));
-            }}
-            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 border-gray-300"
-            placeholder="+1234567890"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Discount Code (Optional)
-          </label>
-          <input
-            type="text"
-            value={customerInfo.discountCode}
-            onChange={(e) => setCustomerInfo(prev => ({ ...prev, discountCode: e.target.value }))}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500"
-            placeholder="Enter code"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Order Notes (Optional)
-          </label>
-          <textarea
-            value={customerInfo.notes}
-            onChange={(e) => setCustomerInfo(prev => ({ ...prev, notes: e.target.value }))}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500"
-            placeholder="Any special instructions for your order"
-            rows={3}
-          />
-        </div>
+  const renderInformationStep = () => (
+    <div className="p-4 space-y-4">
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Email <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="email"
+          value={customerInfo.email}
+          onChange={(e) => handleInputChange('email', e.target.value)}
+          className={`w-full p-2 border rounded-lg ${
+            errors.email ? 'border-red-500' : 'border-gray-300'
+          } focus:outline-none focus:ring-2 focus:ring-primary-500`}
+          placeholder="your@email.com"
+        />
+        {errors.email && (
+          <p className="mt-1 text-sm text-red-500">{errors.email}</p>
+        )}
       </div>
-    );
-  };
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Full Name <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          value={customerInfo.name}
+          onChange={(e) => handleInputChange('name', e.target.value)}
+          className={`w-full p-2 border rounded-lg ${
+            errors.name ? 'border-red-500' : 'border-gray-300'
+          } focus:outline-none focus:ring-2 focus:ring-primary-500`}
+          placeholder="Enter your full name"
+        />
+        {errors.name && (
+          <p className="mt-1 text-sm text-red-500">{errors.name}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          WhatsApp Number (Optional)
+        </label>
+        <input
+          type="tel"
+          value={customerInfo.whatsapp}
+          onChange={(e) => handleInputChange('whatsapp', e.target.value)}
+          className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+          placeholder="+1234567890"
+        />
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Notes (Optional)
+        </label>
+        <textarea
+          value={customerInfo.notes}
+          onChange={(e) => handleInputChange('notes', e.target.value)}
+          className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+          rows={3}
+          placeholder="Any special instructions or notes"
+        />
+      </div>
+    </div>
+  );
 
   const renderPaymentStep = () => {
     return (
@@ -427,7 +682,9 @@ export default function Cart() {
                   )}
                   <div className="flex justify-between">
                     <span className="text-gray-600">Total Amount:</span>
-                    <span className="font-medium">${cartTotal.toFixed(2)}</span>
+                    <span className="text-xl font-bold text-primary-600">
+                      ${cartTotal.toFixed(2)}
+                    </span>
                   </div>
                 </div>
 
@@ -437,52 +694,38 @@ export default function Cart() {
                     <p className="text-sm mt-1">{customerInfo.notes}</p>
                   </div>
                 )}
+
                 <div className="pt-6 border-t">
                   <div className="flex justify-center mb-3">
                     <img src="/payment-logos/paypal.svg" alt="PayPal" className="h-5 sm:h-6" />
                   </div>
 
-                  {paymentUrl ? (
-                    <button
-                      onClick={() => {
-                        if (paymentWindow?.closed) {
-                          const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
-                          setPaymentWindow(newWindow);
-                        } else {
-                          paymentWindow?.focus();
-                        }
-                      }}
-                      className="w-full bg-[#0070ba] text-white py-3 px-4 rounded-lg hover:bg-[#003087] transition-colors flex items-center justify-center gap-2 text-sm sm:text-base font-medium"
-                    >
-                      <img src="/payment-logos/paypal.svg" alt="" className="h-4 brightness-0 invert" />
-                      Return to PayPal
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleCheckout}
-                      disabled={isProcessing}
-                      className="w-full bg-[#0070ba] text-white py-3 px-4 rounded-lg hover:bg-[#003087] transition-colors flex items-center justify-center gap-2 text-sm sm:text-base font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isProcessing ? (
-                        <div className="flex items-center gap-2">
-                          <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Processing...
-                        </div>
-                      ) : (
-                        <>
-                          <img src="/payment-logos/paypal.svg" alt="" className="h-4 brightness-0 invert" />
-                          Complete Order Now
-                        </>
-                      )}
-                    </button>
+                  {currentOrder && !hasCartChanged() && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <img src="/payment-logos/paypal.svg" alt="PayPal" className="h-6" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-blue-900 mb-2">Please complete your payment</h3>
+                      <div className="flex items-center justify-between text-blue-700">
+                        <span>Time remaining:</span>
+                        <span className="font-medium">{timeLeft !== null ? formatTime(timeLeft) : 'Expired'}</span>
+                      </div>
+                    </div>
                   )}
 
-                  <p className="text-center text-xs text-gray-500 mt-3">
-                    Secure checkout powered by PayPal
-                  </p>
+                  <button
+                    onClick={handleButtonClick}
+                    disabled={isProcessing}
+                    className={`w-full py-3 px-4 rounded-lg font-medium text-white ${
+                      isProcessing
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : currentOrder && !hasCartChanged()
+                        ? 'bg-blue-600 hover:bg-blue-700'
+                        : 'bg-primary-600 hover:bg-primary-700'
+                    }`}
+                  >
+                    {getButtonText()}
+                  </button>
                 </div>
               </div>
             </div>
@@ -509,13 +752,127 @@ export default function Cart() {
     setCurrentStep(0);
   }, [items.length, isOpen]);
 
-  // Load customer info from cookie/localStorage
   useEffect(() => {
     const savedEmail = localStorage.getItem('customer_email');
     if (savedEmail) {
       setCustomerInfo(prev => ({ ...prev, email: savedEmail }));
     }
   }, []);
+
+  useEffect(() => {
+    Fancybox.bind("[data-fancybox]", {
+      dragToClose: false,
+      closeButton: "top",
+      autoFocus: false,
+      trapFocus: false,
+      placeFocusBack: false,
+    });
+
+    return () => {
+      Fancybox.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (hasCartChanged()) {
+      resetPaymentSession(true); // Clear storage when cart changes
+    }
+  }, [items]);
+
+  useEffect(() => {
+    if (paymentStatus === 'paid') {
+      resetPaymentSession(true); // Clear storage when payment is completed
+    }
+  }, [paymentStatus]);
+
+  useEffect(() => {
+    const validateStoredPayment = async () => {
+      const storedUrl = localStorage.getItem('payment_url');
+      const storedOrderId = localStorage.getItem('last_order_id');
+      
+      if (!storedUrl || !storedOrderId) {
+        resetPaymentSession(false);
+        return;
+      }
+
+      try {
+        const status = await checkPaymentStatus(parseInt(storedOrderId));
+        
+        if (!status) {
+          resetPaymentSession(true); // Clear storage if payment status check fails
+          return;
+        }
+
+        if (status.isPaid) {
+          handlePaymentCompletion(parseInt(storedOrderId));
+          return;
+        }
+
+        if (currentOrder?.id === parseInt(storedOrderId)) {
+          setPaymentUrl(storedUrl);
+          setLastOrderId(parseInt(storedOrderId));
+          startCountdown();
+          startPaymentCheck(parseInt(storedOrderId));
+        } else {
+          resetPaymentSession(true); // Clear storage if order ID doesn't match
+        }
+      } catch (error) {
+        console.error('Error checking stored payment:', error);
+        resetPaymentSession(true); // Clear storage on error
+      }
+    };
+
+    validateStoredPayment();
+  }, [currentOrder]);
+
+  useEffect(() => {
+    const storedUrl = localStorage.getItem('payment_url');
+    const storedOrderId = localStorage.getItem('last_order_id');
+    
+    if (storedUrl && storedOrderId && currentOrder?.id === parseInt(storedOrderId)) {
+      setPaymentUrl(storedUrl);
+      setLastOrderId(parseInt(storedOrderId));
+    } else {
+      resetPaymentSession(false);
+    }
+  }, [currentOrder]);
+
+  useEffect(() => {
+    const handleUnload = () => {
+      localStorage.removeItem('payment_url');
+      localStorage.removeItem('last_order_id');
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      if (paymentCheckInterval.current) {
+        clearInterval(paymentCheckInterval.current);
+        paymentCheckInterval.current = undefined;
+      }
+      // Don't reset payment session when closing cart
+    }
+  }, [isOpen]);
 
   return (
     <AnimatePresence mode="wait">
@@ -526,7 +883,7 @@ export default function Cart() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60]"
-            onClick={() => setIsOpen(false)}
+            onClick={() => handleClose()}
           />
           <motion.div
             initial={{ x: '100%' }}
@@ -550,7 +907,7 @@ export default function Cart() {
                     <h2 className="text-xl font-bold">{CHECKOUT_STEPS[currentStep].name}</h2>
                   </div>
                   <button 
-                    onClick={() => setIsOpen(false)}
+                    onClick={handleClose}
                     className="p-2 hover:bg-gray-100 rounded-full"
                   >
                     <X className="w-6 h-6" />
@@ -584,7 +941,16 @@ export default function Cart() {
                     <p className="text-gray-600">Add items to your cart to continue shopping</p>
                   </div>
                 ) : (
-                  renderStepContent()
+                  <>
+                    {paymentUrl && timeLeft !== null && (
+                      <PaymentCountdown
+                        timeLeft={timeLeft}
+                        paymentUrl={paymentUrl}
+                        onExpired={handleCountdownExpired}
+                      />
+                    )}
+                    {renderStepContent()}
+                  </>
                 )}
               </div>
 
@@ -615,15 +981,18 @@ export default function Cart() {
                     </div>
                   </div>
                 )}
-                <button 
-                  className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-primary-700 transition-colors duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={items.length === 0}
-                  onClick={handleCheckout}
+                <button
+                  onClick={handleButtonClick}
+                  disabled={isProcessing}
+                  className={`w-full py-3 px-4 rounded-lg font-medium text-white ${
+                    isProcessing
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : currentOrder && !hasCartChanged()
+                      ? 'bg-blue-600 hover:bg-blue-700'
+                      : 'bg-primary-600 hover:bg-primary-700'
+                  }`}
                 >
-                  <span>
-                    {currentStep === CHECKOUT_STEPS.length - 1 ? 'Pay Now' : 'Continue'}
-                  </span>
-                  <ArrowRight className="w-5 h-5" />
+                  {getButtonText()}
                 </button>
               </div>
             </div>
@@ -631,52 +1000,13 @@ export default function Cart() {
         </div>
       )}
 
-      {/* Processing Modal */}
-      {isProcessing && (
-        <div className="fixed inset-0 flex items-center justify-center z-[100]">
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" />
-          <div className="relative bg-white rounded-lg shadow-xl w-full max-w-md p-6 z-[110]">
-            <div className="text-center">
-              <div className="w-16 h-16 mx-auto mb-4">
-                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-600"></div>
-              </div>
-              <h2 className="text-lg font-medium text-gray-900 mb-2">Processing Order</h2>
-              <p className="text-sm text-gray-500">
-                Opening PayPal in {countdown} seconds...
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Payment Status Modal */}
-      {paymentUrl && !isProcessing && (
-        <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-xl p-4 z-[9999] max-w-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10">
-              <img src="/payment-logos/paypal.svg" alt="PayPal" className="w-full h-full" />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-sm font-medium text-gray-900">Complete Your Payment</h3>
-              <p className="text-xs text-gray-500">Checking payment status...</p>
-            </div>
-          </div>
-          <div className="mt-3">
-            <button
-              onClick={() => {
-                if (paymentWindow?.closed) {
-                  const newWindow = window.open(paymentUrl, '_blank', 'fullscreen=yes');
-                  setPaymentWindow(newWindow);
-                } else {
-                  paymentWindow?.focus();
-                }
-              }}
-              className="w-full px-3 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700"
-            >
-              Return to PayPal
-            </button>
-          </div>
-        </div>
+      {paymentUrl && (
+        <a
+          href={paymentUrl}
+          data-fancybox
+          data-type="iframe"
+          style={{ display: 'none' }}
+        />
       )}
     </AnimatePresence>
   );

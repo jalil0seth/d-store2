@@ -171,7 +171,13 @@ export const useOrderStore = create<OrderStore>()(
                 try {
                     const response = await axios.post(`/api/orders/${order.id}/pay`);
                     const { url, id } = response.data;
-                    return { url, id };
+                    
+                    // Store payment info in localStorage
+                    localStorage.setItem('last_order_id', order.id.toString());
+                    localStorage.setItem('payment_url', url);
+                    
+                    set({ url, id });
+                    return response.data;
                 } catch (error) {
                     set({
                         error: error instanceof Error ? error.message : 'Failed to create payment',

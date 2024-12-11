@@ -16,6 +16,12 @@ Route::get('/', function () {
     return Inertia::render('HomePage');
 })->name('home');
 
+Route::get('/thank-you/{orderId?}', function ($orderId = null) {
+    return Inertia::render('ThankYou', [
+        'orderId' => $orderId
+    ]);
+})->name('thank.you');
+
 Route::get('/products', function () {
     return Inertia::render('ProductsPage');
 })->name('products');

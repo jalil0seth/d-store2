@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
+use App\Helpers\DeviceHash;
 use App\Services\PayPalService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cookie;
@@ -20,7 +21,7 @@ class OrderController extends Controller
 
     public function index(Request $request)
     {
-        $deviceHash = $request->cookie('device_hash');
+        $deviceHash = DeviceHash::get();
         
         $orders = Order::where('customer_device_hash', $deviceHash)
             ->orderBy('created_at', 'desc')
@@ -31,49 +32,52 @@ class OrderController extends Controller
 
     public function store(Request $request)
     {
-        $validator = Validator::make($request->all(), [
-            'items' => 'required|array',
-            'items.*.id' => 'required|string',
-            'items.*.name' => 'required|string',
-            'items.*.price' => 'required|numeric',
-            'items.*.quantity' => 'required|integer|min:1',
-            'total' => 'required|numeric|min:0',
-            'email' => 'nullable|email',
-            'customer_info' => 'nullable|array',
-            'customer_info.name' => 'nullable|string',
-            'customer_info.whatsapp' => 'nullable|string',
-            'discount' => 'nullable|numeric|min:0'
-        ]);
+        try {
+            $validator = Validator::make($request->all(), [
+                'items' => 'required|array',
+                'items.*.id' => 'required|string',
+                'items.*.quantity' => 'required|integer|min:1',
+                'total' => 'required|numeric|min:0',
+                'email' => 'required|email',
+                'customer_info' => 'required|array',
+                'customer_info.name' => 'required|string',
+                'discount' => 'nullable|numeric|min:0'
+            ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
+            if ($validator->fails()) {
+                return response()->json(['errors' => $validator->errors()], 422);
+            }
+
+            $order = Order::create([
+                'customer_email' => $request->email,
+                'customer_info' => $request->customer_info,
+                'items' => $request->items,
+                'total' => $request->total,
+                'discount' => $request->discount ?? 0,
+                'payment_status' => 'pending',
+                'delivery_status' => 'pending',
+                'customer_device_hash' => DeviceHash::get()
+            ]);
+
+            return response()->json($order, 201);
+
+        } catch (\Exception $e) {
+            Log::error('Order creation failed:', [
+                'error' => $e->getMessage(),
+                'request_data' => $request->all(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'error' => $e->getMessage()
+            ], 400);
         }
-
-        // Get or create device hash
-        $deviceHash = $request->cookie('device_hash');
-        if (!$deviceHash) {
-            $deviceHash = hash('sha256', uniqid('', true));
-            Cookie::queue('device_hash', $deviceHash, 60 * 24 * 365 * 10); // 10 years
-        }
-
-        $order = Order::create([
-            'customer_device_hash' => $deviceHash,
-            'email' => $request->email,
-            'customer_info' => $request->customer_info,
-            'items' => $request->items,
-            'total' => $request->total,
-            'discount' => $request->discount ?? 0,
-            'payment_status' => 'pending',
-            'delivery_status' => 'pending'
-        ]);
-
-        return response()->json($order, 201);
     }
 
     public function show(Order $order, Request $request)
     {
         // Verify the order belongs to the current device
-        if ($order->customer_device_hash !== $request->cookie('device_hash')) {
+        if ($order->customer_device_hash !== DeviceHash::get()) {
             return response()->json(['message' => 'Order not found'], 404);
         }
 
@@ -126,6 +130,44 @@ class OrderController extends Controller
         return response()->json($order);
     }
 
+    public function createPayPalInvoice(Order $order)
+    {
+        try {
+            if ($order->payment_status === 'paid') {
+                return response()->json(['error' => 'Order is already paid'], 400);
+            }
+
+            if (empty($order->customer_email)) {
+                return response()->json(['error' => 'Customer email is required'], 400);
+            }
+
+            $result = $this->paypalService->createInvoice(
+                $order->total,
+                $order->id,
+                $order->customer_email
+            );
+
+            $order->update([
+                'payment_status' => 'processing',
+                'payment_provider' => 'paypal',
+                'payment_id' => $result['id']
+            ]);
+
+            return response()->json($result);
+
+        } catch (\Exception $e) {
+            Log::error('Payment creation failed:', [
+                'error' => $e->getMessage(),
+                'order_id' => $order->id,
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'error' => $e->getMessage()
+            ], 400);
+        }
+    }
+
     public function pay(Order $order)
     {
         try {
@@ -134,9 +176,9 @@ class OrderController extends Controller
             }
 
             $result = $this->paypalService->createInvoice(
-                $order->total - $order->discount,
+                $order->total,
                 $order->id,
-                $order->email
+                $order->customer_email
             );
 
             $order->update([
@@ -172,8 +214,8 @@ class OrderController extends Controller
 
             $result = $this->paypalService->createInvoice(
                 $order->total,
-                $order->orderRef,
-                $order->email
+                $order->id,
+                $order->customer_email
             );
 
             // Update order with payment info
@@ -199,37 +241,67 @@ class OrderController extends Controller
         }
     }
 
-    public function checkPaymentStatus(Order $order)
+    /**
+     * Check payment status for an order
+     */
+    public function checkPaymentStatus($orderId)
     {
         try {
-            if (!$order->payment_id) {
+            $order = Order::findOrFail($orderId);
+            $invoiceId = $order->payment_metadata['invoice_id'] ?? null;
+            
+            if (!$invoiceId) {
                 return response()->json([
-                    'error' => 'No payment found for this order'
-                ], 400);
-            }
-
-            $result = $this->paypalService->checkInvoiceStatus($order->payment_id);
-
-            if ($result['status'] === 'paid' && $order->payment_status !== 'paid') {
-                $order->update([
-                    'payment_status' => 'paid',
-                    'paid_at' => now()
+                    'status' => $order->payment_status,
+                    'redirect' => $order->payment_status === 'paid' ? route('thank.you', ['orderId' => $order->id]) : null,
+                    'paidAt' => $order->paid_at
                 ]);
             }
 
-            return response()->json([
-                'status' => $result['status']
-            ]);
+            try {
+                $paymentResult = $this->paypalService->checkInvoiceStatus($invoiceId);
+                
+                // Update order status if payment is completed
+                if ($paymentResult['status'] === 'paid' && $order->payment_status !== 'paid') {
+                    $order->update([
+                        'payment_status' => 'paid',
+                        'paid_at' => now(),
+                        'payment_metadata' => array_merge(
+                            $order->payment_metadata ?? [],
+                            ['payment_info' => $paymentResult['payment_info']]
+                        )
+                    ]);
+                }
 
+                return response()->json([
+                    'status' => $order->payment_status,
+                    'redirect' => $order->payment_status === 'paid' ? route('thank.you', ['orderId' => $order->id]) : null,
+                    'paidAt' => $order->paid_at,
+                    'paymentDetails' => [
+                        'status' => $paymentResult['status'],
+                        'raw_status' => $paymentResult['raw_status'],
+                        'invoice_id' => $paymentResult['invoice_id']
+                    ]
+                ]);
+
+            } catch (\Exception $e) {
+                Log::error('Payment status check failed:', [
+                    'order_id' => $orderId,
+                    'invoice_id' => $invoiceId,
+                    'error' => $e->getMessage()
+                ]);
+                
+                return response()->json([
+                    'status' => $order->payment_status,
+                    'redirect' => $order->payment_status === 'paid' ? route('thank.you', ['orderId' => $order->id]) : null,
+                    'paidAt' => $order->paid_at,
+                    'error' => 'Failed to check payment status'
+                ]);
+            }
         } catch (\Exception $e) {
-            Log::error('Payment status check failed:', [
-                'order' => $order->id,
-                'error' => $e->getMessage()
-            ]);
-            
             return response()->json([
-                'error' => 'Failed to check payment status'
-            ], 500);
+                'error' => 'Order not found'
+            ], 404);
         }
     }
 }
