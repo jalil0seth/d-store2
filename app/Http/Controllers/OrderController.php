@@ -57,15 +57,6 @@ class OrderController extends Controller
                 return response()->json(['errors' => $validator->errors()], 422);
             }
 
-            // Validate that each item's variant quantity is sufficient
-            foreach ($request->items as $item) {
-                if ($item['quantity'] > $item['variant_quantity']) {
-                    return response()->json([
-                        'error' => "Insufficient stock for {$item['product_name']} - {$item['variant_name']}"
-                    ], 422);
-                }
-            }
-
             // Get active PayPal payment config
             $paypalPayment = Payment::where('name', 'paypal')
                 ->where('active', true)

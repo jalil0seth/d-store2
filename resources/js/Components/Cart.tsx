@@ -239,7 +239,7 @@ export default function Cart() {
       } catch (error) {
         console.error('Payment status check failed:', error);
       }
-    }, 5000);
+    }, 10000);
 
     paymentCheckInterval.current = checkInterval;
   };
