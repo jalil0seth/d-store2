@@ -5,8 +5,6 @@ import { useCartStore } from '../store/cartStore';
 import { useOrderStore } from '../store/orderStore';
 import { router } from '@inertiajs/react';
 import axios from 'axios';
-import { Fancybox } from "@fancyapps/ui";
-import "@fancyapps/ui/dist/fancybox/fancybox.css";
 import PaymentCountdown from './PaymentCountdown';
 
 const CHECKOUT_STEPS = [
@@ -945,15 +943,6 @@ export default function Cart() {
             </div>
           </motion.div>
         </div>
-      )}
-
-      {paymentUrl && (
-        <a
-          href={paymentUrl}
-          data-fancybox
-          data-type="iframe"
-          style={{ display: 'none' }}
-        />
       )}
     </AnimatePresence>
   );
