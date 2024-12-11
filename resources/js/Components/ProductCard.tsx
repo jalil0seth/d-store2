@@ -72,23 +72,46 @@ export default function ProductCard({ product, layout = true }: ProductCardProps
     e.preventDefault();
     e.stopPropagation();
     
-    const itemToAdd = {
+    if (!product.id) {
+      console.error('Invalid product: missing ID');
+      return;
+    }
+
+    // If no variant is selected and we have variants, select the first one
+    if (!selectedVariant && variants.length > 0) {
+      setSelectedVariant(variants[0]);
+      return;
+    }
+
+    // Prepare product object according to Product interface
+    const productData = {
       id: product.id,
       name: product.name,
-      price: selectedVariant?.price || product.price || 0,
-      originalPrice: selectedVariant?.original_price || selectedVariant?.price || product.originalPrice || product.price || 0,
-      discount: selectedVariant?.discountPercentage || product.discount || 0,
-      image: product.image || product.images?.[0],
-      description: product.description,
-      variant: selectedVariant ? {
+      image: product.image || product.images?.[0] || ''
+    };
+
+    // If we have a selected variant, use it
+    if (selectedVariant) {
+      const variantData = {
+        id: `${product.id}-${selectedVariant.name}`, // Generate a unique variant ID
         name: selectedVariant.name,
         price: selectedVariant.price,
-        discountPercentage: selectedVariant.discountPercentage,
-        billingCycle: selectedVariant.billingCycle
-      } : undefined
-    };
-    
-    addItem(itemToAdd);
+        original_price: selectedVariant.original_price,
+        quantity: 1 // You might want to get this from your backend
+      };
+      addItem(productData, variantData);
+    } else {
+      // If no variants, create a default variant from product data
+      const defaultVariant = {
+        id: `${product.id}-default`,
+        name: 'Default',
+        price: product.price,
+        original_price: product.originalPrice,
+        quantity: 1 // You might want to get this from your backend
+      };
+      addItem(productData, defaultVariant);
+    }
+
     setIsOpen(true); // Open the cart after adding item
   };
 

@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use App\Models\Payment;
 
 class OrderController extends Controller
 {
@@ -35,17 +36,43 @@ class OrderController extends Controller
         try {
             $validator = Validator::make($request->all(), [
                 'items' => 'required|array',
-                'items.*.id' => 'required|string',
+                'items.*.product_id' => 'required|string',
+                'items.*.product_name' => 'required|string',
+                'items.*.variant_name' => 'required|string',
+                'items.*.variant_id' => 'required|string',
+                'items.*.product_image' => 'required|string',
+                'items.*.variant_price' => 'required|numeric',
+                'items.*.variant_original_price' => 'required|numeric',
+                'items.*.variant_quantity' => 'required|integer|min:0',
                 'items.*.quantity' => 'required|integer|min:1',
                 'total' => 'required|numeric|min:0',
                 'email' => 'required|email',
                 'customer_info' => 'required|array',
                 'customer_info.name' => 'required|string',
-                'discount' => 'nullable|numeric|min:0'
+                'discount' => 'nullable|numeric|min:0',
+                'customer_device_hash' => 'required|string'
             ]);
 
             if ($validator->fails()) {
                 return response()->json(['errors' => $validator->errors()], 422);
+            }
+
+            // Validate that each item's variant quantity is sufficient
+            foreach ($request->items as $item) {
+                if ($item['quantity'] > $item['variant_quantity']) {
+                    return response()->json([
+                        'error' => "Insufficient stock for {$item['product_name']} - {$item['variant_name']}"
+                    ], 422);
+                }
+            }
+
+            // Get active PayPal payment config
+            $paypalPayment = Payment::where('name', 'paypal')
+                ->where('active', true)
+                ->first();
+
+            if (!$paypalPayment) {
+                throw new \Exception('PayPal payment configuration not found');
             }
 
             $order = Order::create([
@@ -56,16 +83,40 @@ class OrderController extends Controller
                 'discount' => $request->discount ?? 0,
                 'payment_status' => 'pending',
                 'delivery_status' => 'pending',
-                'customer_device_hash' => DeviceHash::get()
+                'payment_id' => $paypalPayment->id,
+                'customer_device_hash' => $request->customer_device_hash
             ]);
+
+            // Create PayPal invoice
+            try {
+                $result = $this->paypalService->createInvoice(
+                    $order->total,
+                    $order->id,
+                    $order->customer_email
+                );
+
+                $order->update([
+                    'invoice_id' => $result['id'],
+                    'payment_url' => $result['url'],
+                    'payment_metadata' => [
+                        'invoice_id' => $result['id'],
+                        'created_at' => now(),
+                        'provider' => 'paypal'
+                    ]
+                ]);
+            } catch (\Exception $e) {
+                Log::error('Failed to create PayPal invoice:', [
+                    'order_id' => $order->id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             return response()->json($order, 201);
 
         } catch (\Exception $e) {
             Log::error('Order creation failed:', [
                 'error' => $e->getMessage(),
-                'request_data' => $request->all(),
-                'trace' => $e->getTraceAsString()
+                'request_data' => $request->all()
             ]);
             
             return response()->json([
@@ -77,7 +128,7 @@ class OrderController extends Controller
     public function show(Order $order, Request $request)
     {
         // Verify the order belongs to the current device
-        if ($order->customer_device_hash !== DeviceHash::get()) {
+        if ($order->customer_device_hash !== $request->header('X-Device-Hash')) {
             return response()->json(['message' => 'Order not found'], 404);
         }
 

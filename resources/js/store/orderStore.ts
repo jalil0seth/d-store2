@@ -14,6 +14,18 @@ interface OrderItem {
     quantity: number;
 }
 
+interface CartItem {
+    product_id: string;
+    product_name: string;
+    variant_name: string;
+    variant_id: string;
+    product_image: string;
+    variant_price: number;
+    variant_original_price: number;
+    variant_quantity: number;
+    quantity: number;
+}
+
 export interface Order {
     id: number;
     order_number: string;
@@ -44,18 +56,19 @@ interface OrderStore {
     isLoading: boolean;
     error: string | null;
     createOrder: (
-        items: OrderItem[], 
+        items: CartItem[], 
         total: number, 
         email?: string, 
         customerInfo?: Order['customer_info'],
-        discount?: number
+        discount?: number,
+        deviceHash?: string
     ) => Promise<Order>;
     fetchOrders: () => Promise<void>;
-    getOrder: (orderId: number) => Promise<void>;
-    updatePaymentStatus: (orderId: number, status: Order['payment_status'], metadata: any) => Promise<void>;
-    updateDeliveryStatus: (orderId: number, status: Order['delivery_status'], message: string) => Promise<void>;
-    payOrder: (order: Order) => Promise<{ url: string; id: string }>;
-    checkPaymentStatus: (order: Order) => Promise<{ status: string }>;
+    getOrder: (orderId: number) => Promise<Order>;
+    updatePaymentStatus: (orderId: number, status: string, metadata?: any) => Promise<void>;
+    updateDeliveryStatus: (orderId: number, status: string, message: string) => Promise<void>;
+    payOrder: (order: Order) => Promise<{ url: string }>;
+    checkPaymentStatus: (order: Order) => Promise<any>;
     clearCurrentOrder: () => void;
     clearError: () => void;
 }
@@ -68,64 +81,96 @@ export const useOrderStore = create<OrderStore>()(
             isLoading: false,
             error: null,
 
-            createOrder: async (items, total, email, customerInfo, discount = 0) => {
+            createOrder: async (items, total, email, customerInfo, discount = 0, deviceHash) => {
                 set({ isLoading: true, error: null });
                 try {
                     const response = await axios.post('/api/orders', { 
-                        items, 
+                        items: items.map(item => ({
+                            product_id: item.product_id,
+                            product_name: item.product_name,
+                            variant_name: item.variant_name,
+                            variant_id: item.variant_id,
+                            product_image: item.product_image,
+                            variant_price: item.variant_price,
+                            variant_original_price: item.variant_original_price,
+                            variant_quantity: item.variant_quantity,
+                            quantity: item.quantity
+                        })),
                         total,
                         email,
                         customer_info: customerInfo,
-                        discount
+                        discount,
+                        customer_device_hash: deviceHash
+                    }, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
                     });
                     const order = response.data;
                     set(state => ({
                         orders: [order, ...state.orders],
-                        currentOrder: order,
-                        isLoading: false
+                        currentOrder: order
                     }));
                     return order;
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to create order',
-                        isLoading: false
-                    });
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
                     throw error;
+                } finally {
+                    set({ isLoading: false });
                 }
             },
 
             fetchOrders: async () => {
                 set({ isLoading: true, error: null });
                 try {
-                    const response = await axios.get('/api/orders');
-                    set({ orders: response.data.data, isLoading: false });
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to fetch orders',
-                        isLoading: false
+                    const deviceHash = localStorage.getItem('device_hash');
+                    const response = await axios.get('/api/orders', {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
                     });
+                    set({ orders: response.data.data, isLoading: false });
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
+                } finally {
+                    set({ isLoading: false });
                 }
             },
 
-            getOrder: async (orderId) => {
-                set({ isLoading: true, error: null });
+            getOrder: async (orderId: number) => {
                 try {
-                    const response = await axios.get(`/api/orders/${orderId}`);
-                    set({ currentOrder: response.data, isLoading: false });
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to get order',
-                        isLoading: false
+                    set({ isLoading: true, error: null });
+                    const deviceHash = localStorage.getItem('device_hash');
+                    const response = await axios.get(`/api/orders/${orderId}`, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
                     });
+                    const order = response.data;
+                    set({ currentOrder: order });
+                    return order;
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
+                    throw error;
+                } finally {
+                    set({ isLoading: false });
                 }
             },
 
             updatePaymentStatus: async (orderId, status, metadata) => {
                 set({ isLoading: true, error: null });
                 try {
+                    const deviceHash = localStorage.getItem('device_hash');
                     const response = await axios.patch(`/api/orders/${orderId}/payment`, {
                         payment_status: status,
                         payment_metadata: metadata
+                    }, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
                     });
                     const updatedOrder = response.data;
                     set(state => ({
@@ -135,20 +180,25 @@ export const useOrderStore = create<OrderStore>()(
                         currentOrder: state.currentOrder?.id === orderId ? updatedOrder : state.currentOrder,
                         isLoading: false
                     }));
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to update payment status',
-                        isLoading: false
-                    });
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
+                } finally {
+                    set({ isLoading: false });
                 }
             },
 
             updateDeliveryStatus: async (orderId, status, message) => {
                 set({ isLoading: true, error: null });
                 try {
+                    const deviceHash = localStorage.getItem('device_hash');
                     const response = await axios.patch(`/api/orders/${orderId}/delivery`, {
                         delivery_status: status,
                         message
+                    }, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
                     });
                     const updatedOrder = response.data;
                     set(state => ({
@@ -158,31 +208,34 @@ export const useOrderStore = create<OrderStore>()(
                         currentOrder: state.currentOrder?.id === orderId ? updatedOrder : state.currentOrder,
                         isLoading: false
                     }));
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to update delivery status',
-                        isLoading: false
-                    });
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
+                } finally {
+                    set({ isLoading: false });
                 }
             },
 
             payOrder: async (order) => {
                 set({ isLoading: true, error: null });
                 try {
-                    const response = await axios.post(`/api/orders/${order.id}/pay`);
-                    const { url, id } = response.data;
+                    const deviceHash = localStorage.getItem('device_hash');
+                    const response = await axios.post(`/api/orders/${order.id}/pay`, {}, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
+                    });
+                    const { url } = response.data;
                     
                     // Store payment info in localStorage
                     localStorage.setItem('last_order_id', order.id.toString());
                     localStorage.setItem('payment_url', url);
                     
-                    set({ url, id });
+                    set({ url });
                     return response.data;
-                } catch (error) {
-                    set({
-                        error: error instanceof Error ? error.message : 'Failed to create payment',
-                        isLoading: false
-                    });
+                } catch (error: any) {
+                    const message = error.response?.data?.error || error.message;
+                    set({ error: message });
                     throw error;
                 } finally {
                     set({ isLoading: false });
@@ -191,9 +244,14 @@ export const useOrderStore = create<OrderStore>()(
 
             checkPaymentStatus: async (order) => {
                 try {
-                    const response = await axios.get(`/api/orders/${order.id}/payment-status`);
+                    const deviceHash = localStorage.getItem('device_hash');
+                    const response = await axios.get(`/api/orders/${order.id}/payment-status`, {
+                        headers: {
+                            'X-Device-Hash': deviceHash
+                        }
+                    });
                     return response.data;
-                } catch (error) {
+                } catch (error: any) {
                     console.error('Failed to check payment status:', error);
                     throw error;
                 }
